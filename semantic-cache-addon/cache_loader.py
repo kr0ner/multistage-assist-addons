@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from .cache_types import CacheEntry
+from cache_types import CacheEntry
 
 logger = logging.getLogger("reranker.cache_loader")
 

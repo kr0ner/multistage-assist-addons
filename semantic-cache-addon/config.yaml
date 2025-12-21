@@ -1,5 +1,5 @@
 name: "Semantic Cache Add-on"
-version: "1.0.0"
+version: "1.0.1"
 slug: "semantic_reranker"
 description: "Semantic cache lookup + CrossEncoder reranker for Multi-Stage Assist"
 url: "https://github.com/kr0ner/semantic-cache-addon"
