@@ -1,0 +1,466 @@
+"""
+Semantic Cache & Reranker API.
+
+Home Assistant addon that provides:
+1. CrossEncoder reranking API (/rerank)
+2. Full semantic cache lookup (/lookup)
+
+Combines BM25 keyword search with vector similarity and reranking
+for fast, accurate command resolution.
+"""
+
+import os
+import re
+import sys
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from sentence_transformers import CrossEncoder
+
+from cache_types import CacheEntry, DOMAIN_THRESHOLDS
+from cache_loader import CacheLoader
+from bm25_index import BM25Index
+from file_watcher import CacheFileWatcher
+import embedding as emb
+
+# Configuration from environment (set by run.sh from addon options)
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+DEVICE = os.getenv("RERANKER_DEVICE", "cpu")
+ANCHORS_FILE = os.getenv("ANCHORS_FILE", "/homeassistant/.storage/multistage_assist_anchors.json")
+USER_CACHE_FILE = os.getenv("USER_CACHE_FILE", "/homeassistant/.storage/multistage_assist_semantic_cache.json")
+
+# Hybrid search config
+HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.7"))  # Weight for semantic vs BM25
+HYBRID_NGRAM_SIZE = int(os.getenv("HYBRID_NGRAM_SIZE", "2"))
+VECTOR_THRESHOLD = float(os.getenv("VECTOR_THRESHOLD", "0.5"))
+VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "10"))
+RERANKER_THRESHOLD = float(os.getenv("RERANKER_THRESHOLD", "0.73"))
+
+# Setup logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("reranker")
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
+# Initialize FastAPI
+app = FastAPI(
+    title="Semantic Cache & Reranker API",
+    description="Cache lookup + CrossEncoder reranking for Multi-Stage Assist",
+    version="2.0.0",
+)
+
+# Global state
+reranker_model: CrossEncoder = None
+cache_loader: CacheLoader = None
+bm25_index: BM25Index = None
+file_watcher: CacheFileWatcher = None
+loading = True
+
+
+# ============================================================================
+# Request/Response Models
+# ============================================================================
+
+class RerankRequest(BaseModel):
+    """Request body for reranking."""
+    query: str
+    candidates: List[str]
+
+
+class RerankResponse(BaseModel):
+    """Response with reranking scores."""
+    scores: List[float]
+    best_index: int
+    best_score: float
+
+
+class LookupRequest(BaseModel):
+    """Request body for cache lookup."""
+    query: str
+
+
+class LookupResponse(BaseModel):
+    """Response from cache lookup."""
+    found: bool
+    intent: Optional[str] = None
+    entity_ids: Optional[List[str]] = None
+    slots: Optional[Dict[str, Any]] = None
+    score: float = 0.0
+    original_text: Optional[str] = None
+    reranked: bool = False
+
+
+# ============================================================================
+# Device Detection & Model Loading
+# ============================================================================
+
+def detect_best_device() -> str:
+    """Auto-detect the best available device."""
+    import torch
+
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "unknown"
+        logger.info(f"CUDA available: {device_name}")
+        return "cuda"
+
+    try:
+        import intel_extension_for_pytorch as ipex
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            logger.info("Intel XPU available")
+            return "xpu"
+    except ImportError:
+        pass
+
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        logger.info("Apple MPS available")
+        return "mps"
+
+    logger.info("No GPU detected, using CPU")
+    return "cpu"
+
+
+def load_reranker_on_device(model_name: str, device: str) -> CrossEncoder:
+    """Load CrossEncoder on the specified device."""
+    import torch
+
+    if device == "xpu":
+        try:
+            import intel_extension_for_pytorch as ipex
+            logger.info("Loading reranker with Intel IPEX optimization...")
+            ce = CrossEncoder(model_name, device="cpu")
+            ce.model = ipex.optimize(ce.model)
+            ce.model = ce.model.to("xpu")
+            logger.info("Reranker optimized and moved to Intel XPU")
+            return ce
+        except ImportError:
+            logger.warning("IPEX not available, falling back to CPU")
+            return CrossEncoder(model_name, device="cpu")
+        except Exception as e:
+            logger.warning(f"XPU initialization failed: {e}, falling back to CPU")
+            return CrossEncoder(model_name, device="cpu")
+
+    elif device == "mps":
+        try:
+            return CrossEncoder(model_name, device="mps")
+        except Exception as e:
+            logger.warning(f"MPS failed: {e}, falling back to CPU")
+            return CrossEncoder(model_name, device="cpu")
+
+    elif device == "cuda":
+        try:
+            return CrossEncoder(model_name, device="cuda")
+        except Exception as e:
+            logger.warning(f"CUDA failed: {e}, falling back to CPU")
+            return CrossEncoder(model_name, device="cpu")
+
+    else:
+        return CrossEncoder(model_name, device="cpu")
+
+
+# ============================================================================
+# Numeric Value Normalization
+# ============================================================================
+
+def normalize_numeric_value(text: str) -> Tuple[str, List[Any]]:
+    """
+    Normalize numeric values in text for generalized cache lookup.
+
+    Returns: (normalized_text, extracted_values)
+    Example: "Setze Rollo auf 75%" -> ("Setze Rollo auf 50 Prozent", [75])
+    """
+    extracted = []
+
+    def replace_percent(match):
+        val = match.group(1)
+        extracted.append(int(val))
+        return "50 Prozent"
+
+    def replace_temp(match):
+        val = match.group(1)
+        try:
+            if "." in val or "," in val:
+                extracted.append(float(val.replace(",", ".")))
+            else:
+                extracted.append(int(val))
+        except ValueError:
+            pass
+        return "21 Grad"
+
+    # Percentages: "75%", "75 %", "75 Prozent"
+    text_norm = re.sub(r"(\d+)\s*(?:%|Prozent|prozent)", replace_percent, text, flags=re.IGNORECASE)
+
+    # Temperatures: "23.5 Grad", "23°"
+    if text_norm == text:
+        text_norm = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:Grad|°|grad)", replace_temp, text_norm)
+
+    return text_norm, extracted
+
+
+# ============================================================================
+# Cache Reload Callback
+# ============================================================================
+
+def reload_cache() -> None:
+    """Reload cache and rebuild BM25 index (called by file watcher)."""
+    global bm25_index
+
+    if cache_loader is None:
+        logger.warning("Cache reload called but cache_loader not initialized")
+        return
+
+    try:
+        cache_loader.reload()
+
+        # Rebuild BM25 index
+        if bm25_index is not None:
+            logger.info("Rebuilding BM25 index...")
+            bm25_index.build(cache_loader.get_texts())
+
+        logger.info("Cache reload complete")
+    except Exception as e:
+        logger.error(f"Cache reload failed: {e}")
+
+
+# ============================================================================
+# Startup
+# ============================================================================
+
+@app.on_event("startup")
+async def startup():
+    """Load all models and cache on startup."""
+    global reranker_model, cache_loader, bm25_index, file_watcher, loading
+
+    logger.info("=" * 60)
+    logger.info("STARTING SEMANTIC CACHE & RERANKER ADDON")
+    logger.info("=" * 60)
+    logger.info(f"Reranker model: {RERANKER_MODEL}")
+    logger.info(f"Embedding model: {EMBEDDING_MODEL}")
+    logger.info(f"Device: {DEVICE}")
+    logger.info(f"Anchors file: {ANCHORS_FILE}")
+    logger.info(f"User cache file: {USER_CACHE_FILE}")
+    logger.info("This may take several minutes on first run...")
+
+    # Detect device
+    actual_device = DEVICE
+    if DEVICE == "auto":
+        actual_device = detect_best_device()
+        logger.info(f"Auto-detected device: {actual_device}")
+
+    # Load reranker
+    logger.info("Loading reranker model...")
+    reranker_model = load_reranker_on_device(RERANKER_MODEL, actual_device)
+    logger.info("Reranker model loaded")
+
+    # Load embedding model
+    logger.info("Loading embedding model...")
+    emb.load_embedding_model(EMBEDDING_MODEL, actual_device)
+    logger.info("Embedding model loaded")
+
+    # Load cache
+    logger.info("Loading cache files...")
+    cache_loader = CacheLoader(ANCHORS_FILE, USER_CACHE_FILE)
+    anchor_count, user_count = cache_loader.load()
+    logger.info(f"Cache loaded: {anchor_count} anchors + {user_count} user entries")
+
+    # Build BM25 index
+    logger.info("Building BM25 index...")
+    bm25_index = BM25Index(ngram_size=HYBRID_NGRAM_SIZE)
+    bm25_index.build(cache_loader.get_texts())
+
+    # Start file watcher for cache auto-reload
+    logger.info("Starting cache file watcher...")
+    file_watcher = CacheFileWatcher(
+        file_paths=[ANCHORS_FILE, USER_CACHE_FILE],
+        on_reload=reload_cache,
+        poll_interval=30.0,
+        debounce_seconds=2.0,
+    )
+    await file_watcher.start()
+
+    loading = False
+    logger.info("=" * 60)
+    logger.info("READY! Endpoints: /health, /rerank, /lookup")
+    logger.info("=" * 60)
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Graceful shutdown."""
+    global file_watcher
+
+    logger.info("Shutting down...")
+    if file_watcher:
+        await file_watcher.stop()
+    logger.info("Shutdown complete")
+
+
+# ============================================================================
+# Endpoints
+# ============================================================================
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    cache_entries = len(cache_loader.entries) if cache_loader else 0
+    last_reload = cache_loader.last_reload_time if cache_loader else None
+    return {
+        "status": "loading" if loading else "ok",
+        "reranker_model": RERANKER_MODEL,
+        "embedding_model": EMBEDDING_MODEL,
+        "device": DEVICE,
+        "cache_entries": cache_entries,
+        "last_reload": last_reload,
+    }
+
+
+@app.post("/rerank", response_model=RerankResponse)
+async def rerank(request: RerankRequest):
+    """Rerank candidates against a query."""
+    if loading or reranker_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
+
+    if not request.candidates:
+        raise HTTPException(status_code=400, detail="No candidates provided")
+
+    logger.info(f"Rerank: query='{request.query[:50]}' candidates={len(request.candidates)}")
+
+    pairs = [[request.query, c] for c in request.candidates]
+    raw_scores = reranker_model.predict(pairs)
+    probs = 1 / (1 + np.exp(-raw_scores))
+
+    scores = probs.tolist()
+    best_idx = int(np.argmax(probs))
+
+    logger.info(f"Rerank result: best_idx={best_idx}, best_score={probs[best_idx]:.4f}")
+
+    return RerankResponse(
+        scores=scores,
+        best_index=best_idx,
+        best_score=float(probs[best_idx]),
+    )
+
+
+@app.post("/lookup", response_model=LookupResponse)
+async def lookup(request: LookupRequest):
+    """
+    Two-stage semantic cache lookup.
+
+    Stage 1: Fast vector search + BM25 hybrid scoring
+    Stage 2: Precise reranking with CrossEncoder
+
+    Returns matched cache entry or found=false.
+    """
+    if loading:
+        raise HTTPException(status_code=503, detail="Still loading")
+
+    if not cache_loader or not cache_loader.is_loaded:
+        return LookupResponse(found=False, score=0.0)
+
+    if cache_loader.embeddings_matrix is None or len(cache_loader.entries) == 0:
+        logger.debug("Cache empty")
+        return LookupResponse(found=False, score=0.0)
+
+    query = request.query
+    logger.info(f"Lookup: '{query[:60]}'")
+
+    # Normalize query (handle percentages, temperatures)
+    query_norm, extracted_values = normalize_numeric_value(query)
+    if query_norm != query:
+        logger.debug(f"Normalized: '{query}' -> '{query_norm}' [{extracted_values}]")
+
+    # Get query embedding
+    query_emb = emb.get_embedding(query_norm)
+    if query_emb is None:
+        logger.warning("Failed to get embedding")
+        return LookupResponse(found=False, score=0.0)
+
+    # Compute cosine similarity (embeddings are already normalized)
+    similarities = np.dot(cache_loader.embeddings_matrix, query_emb)
+
+    # Hybrid search: combine with BM25
+    if bm25_index and bm25_index.is_built:
+        bm25_scores = bm25_index.get_scores(query_norm)
+
+        if len(bm25_scores) == len(similarities):
+            hybrid_scores = HYBRID_ALPHA * similarities + (1 - HYBRID_ALPHA) * bm25_scores
+            logger.debug(
+                f"Hybrid: semantic_max={similarities.max():.3f}, "
+                f"bm25_max={bm25_scores.max():.3f}, hybrid_max={hybrid_scores.max():.3f}"
+            )
+            similarities = hybrid_scores
+
+    # Get candidates above threshold
+    candidates: List[Tuple[float, int, CacheEntry]] = []
+    for idx, score in enumerate(similarities):
+        if score >= VECTOR_THRESHOLD:
+            candidates.append((float(score), idx, cache_loader.entries[idx]))
+
+    if not candidates:
+        logger.debug(f"No candidates above threshold {VECTOR_THRESHOLD}")
+        return LookupResponse(found=False, score=0.0)
+
+    # Sort and take top-k
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    candidates = candidates[:VECTOR_TOP_K]
+
+    logger.debug(f"Found {len(candidates)} candidates (top: {candidates[0][0]:.3f})")
+
+    # Stage 2: Reranking
+    pairs = [[query_norm, c[2].text] for c in candidates]
+    raw_scores = reranker_model.predict(pairs)
+    probs = 1 / (1 + np.exp(-raw_scores))
+
+    best_idx = int(np.argmax(probs))
+    best_prob = float(probs[best_idx])
+
+    logger.debug(f"Reranker: best_idx={best_idx}, best_score={best_prob:.4f}")
+
+    # Get domain-specific threshold
+    _, cache_idx, entry = candidates[best_idx]
+    domain = None
+    if entry.entity_ids:
+        parts = entry.entity_ids[0].split(".")
+        if len(parts) > 1:
+            domain = parts[0]
+    threshold = DOMAIN_THRESHOLDS.get(domain, RERANKER_THRESHOLD)
+
+    if best_prob < threshold:
+        logger.info(f"Reranker blocked: {best_prob:.4f} < {threshold:.4f} (domain={domain})")
+        return LookupResponse(found=False, score=best_prob)
+
+    # Success! Build response
+    slots = dict(entry.slots) if entry.slots else {}
+
+    # Inject extracted numeric values
+    if extracted_values:
+        val = extracted_values[0]
+        for key in ["position", "brightness", "temperature", "volume_level"]:
+            if key in slots:
+                logger.debug(f"Injecting {val} into slot '{key}'")
+                slots[key] = val
+
+    logger.info(
+        f"HIT (score={best_prob:.3f}): '{query[:40]}' -> {entry.intent} [{entry.entity_ids}]"
+    )
+
+    return LookupResponse(
+        found=True,
+        intent=entry.intent,
+        entity_ids=entry.entity_ids,
+        slots=slots,
+        score=best_prob,
+        original_text=entry.text,
+        reranked=True,
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=9876, log_level="debug")
