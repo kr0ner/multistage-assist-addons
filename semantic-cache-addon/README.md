@@ -6,7 +6,7 @@ Home Assistant addon providing semantic cache lookup and CrossEncoder reranking 
 
 - **Semantic Cache Lookup** - Fast command resolution via vector + BM25 hybrid search
 - **CrossEncoder Reranking** - Precise semantic validation
-- **GPU Acceleration** - NVIDIA, AMD, Intel, Apple Silicon support
+- **GPU Acceleration** - NVIDIA, AMD, Apple Silicon support
 - **Local Models** - No external API dependencies
 
 ## Installation
@@ -21,7 +21,7 @@ Home Assistant addon providing semantic cache lookup and CrossEncoder reranking 
 |--------|---------|-------------|
 | `reranker_model` | `BAAI/bge-reranker-base` | CrossEncoder model |
 | `embedding_model` | `BAAI/bge-m3` | Embedding model |
-| `device` | `auto` | Device: `auto`, `cpu`, `cuda`, `xpu`, `mps` |
+| `device` | `auto` | Device: `auto`, `cpu`, `cuda`, `mps` |
 | `port` | `9876` | API port |
 | `anchors_file` | `/homeassistant/.storage/multistage_assist_anchors.json` | Pre-generated anchors |
 | `user_cache_file` | `/homeassistant/.storage/multistage_assist_semantic_cache.json` | User-learned cache |

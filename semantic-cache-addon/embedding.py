@@ -22,7 +22,7 @@ def load_embedding_model(model_name: str = "BAAI/bge-m3", device: str = "cpu"):
 
     Args:
         model_name: HuggingFace model name
-        device: Device to load on (cpu, cuda, xpu, mps)
+        device: Device to load on (cpu, cuda, mps)
     """
     global _embedding_model, _embedding_model_name
 
@@ -31,22 +31,13 @@ def load_embedding_model(model_name: str = "BAAI/bge-m3", device: str = "cpu"):
         return
 
     logger.info("Loading embedding model: %s on %s", model_name, device)
+    logger.info("This may take several minutes for large models...")
 
     try:
         from sentence_transformers import SentenceTransformer
 
-        # Handle device-specific loading
-        if device == "xpu":
-            try:
-                import intel_extension_for_pytorch as ipex
-                _embedding_model = SentenceTransformer(model_name, device="cpu")
-                _embedding_model = ipex.optimize(_embedding_model)
-                logger.info("Embedding model optimized for Intel XPU")
-            except ImportError:
-                logger.warning("IPEX not available, using CPU for embeddings")
-                _embedding_model = SentenceTransformer(model_name, device="cpu")
-        else:
-            _embedding_model = SentenceTransformer(model_name, device=device)
+        logger.info("Downloading/loading model weights...")
+        _embedding_model = SentenceTransformer(model_name, device=device)
 
         _embedding_model_name = model_name
         logger.info("Embedding model loaded successfully")

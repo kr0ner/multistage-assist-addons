@@ -110,14 +110,6 @@ def detect_best_device() -> str:
         logger.info(f"CUDA available: {device_name}")
         return "cuda"
 
-    try:
-        import intel_extension_for_pytorch as ipex
-        if hasattr(torch, 'xpu') and torch.xpu.is_available():
-            logger.info("Intel XPU available")
-            return "xpu"
-    except ImportError:
-        pass
-
     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         logger.info("Apple MPS available")
         return "mps"
@@ -128,25 +120,7 @@ def detect_best_device() -> str:
 
 def load_reranker_on_device(model_name: str, device: str) -> CrossEncoder:
     """Load CrossEncoder on the specified device."""
-    import torch
-
-    if device == "xpu":
-        try:
-            import intel_extension_for_pytorch as ipex
-            logger.info("Loading reranker with Intel IPEX optimization...")
-            ce = CrossEncoder(model_name, device="cpu")
-            ce.model = ipex.optimize(ce.model)
-            ce.model = ce.model.to("xpu")
-            logger.info("Reranker optimized and moved to Intel XPU")
-            return ce
-        except ImportError:
-            logger.warning("IPEX not available, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu")
-        except Exception as e:
-            logger.warning(f"XPU initialization failed: {e}, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu")
-
-    elif device == "mps":
+    if device == "mps":
         try:
             return CrossEncoder(model_name, device="mps")
         except Exception as e:
