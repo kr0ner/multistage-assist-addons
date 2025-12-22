@@ -48,6 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("reranker")
 logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+logging.getLogger("watchdog").setLevel(logging.WARNING)
 
 # Initialize FastAPI
 app = FastAPI(
