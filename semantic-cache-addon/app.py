@@ -97,6 +97,36 @@ class LookupResponse(BaseModel):
     reranked: bool = False
 
 
+class EmbedEntryRequest(BaseModel):
+    """Single cache entry to embed."""
+    text: str
+    intent: str
+    entity_ids: List[str] = []
+    slots: Dict[str, Any] = {}
+
+
+class EmbedRequest(BaseModel):
+    """Request body for embedding cache entries."""
+    entries: List[EmbedEntryRequest]
+
+
+class EmbedEntryResponse(BaseModel):
+    """Single cache entry with embedding."""
+    text: str
+    intent: str
+    entity_ids: List[str]
+    slots: Dict[str, Any]
+    embedding: List[float]
+    generated: bool = True
+
+
+class EmbedResponse(BaseModel):
+    """Response with embedded cache entries."""
+    entries: List[EmbedEntryResponse]
+    embedding_model: str
+    embedding_dim: int
+
+
 # ============================================================================
 # Device Detection & Model Loading
 # ============================================================================
@@ -355,12 +385,28 @@ async def lookup(request: LookupRequest):
         logger.warning("Failed to get embedding")
         return LookupResponse(found=False, score=0.0)
 
+    logger.debug(f"Query embedding dim: {query_emb.shape}, cache matrix: {cache_loader.embeddings_matrix.shape}")
+
     # Compute cosine similarity (embeddings are already normalized)
     similarities = np.dot(cache_loader.embeddings_matrix, query_emb)
+
+    # Log top semantic match for debugging
+    top_sem_idx = int(np.argmax(similarities))
+    top_sem_score = float(similarities[top_sem_idx])
+    top_sem_entry = cache_loader.entries[top_sem_idx] if cache_loader.entries else None
+    if top_sem_entry:
+        logger.debug(f"Top semantic: score={top_sem_score:.4f}, text='{top_sem_entry.text[:60]}'")
 
     # Hybrid search: combine with BM25
     if bm25_index and bm25_index.is_built:
         bm25_scores = bm25_index.get_scores(query_norm)
+
+        # Log top BM25 match
+        top_bm25_idx = int(np.argmax(bm25_scores))
+        top_bm25_score = float(bm25_scores[top_bm25_idx])
+        top_bm25_entry = cache_loader.entries[top_bm25_idx] if cache_loader.entries else None
+        if top_bm25_entry:
+            logger.debug(f"Top BM25: score={top_bm25_score:.4f}, text='{top_bm25_entry.text[:60]}'")
 
         if len(bm25_scores) == len(similarities):
             hybrid_scores = HYBRID_ALPHA * similarities + (1 - HYBRID_ALPHA) * bm25_scores
@@ -432,6 +478,55 @@ async def lookup(request: LookupRequest):
         score=best_prob,
         original_text=entry.text,
         reranked=True,
+    )
+
+
+@app.post("/embed", response_model=EmbedResponse)
+async def embed(request: EmbedRequest):
+    """
+    Generate embeddings for cache entries.
+
+    Use this endpoint to create embeddings with the same model
+    used for cache lookup, ensuring consistency.
+    """
+    if loading:
+        raise HTTPException(status_code=503, detail="Still loading")
+
+    if not request.entries:
+        raise HTTPException(status_code=400, detail="No entries provided")
+
+    logger.info(f"Embed: processing {len(request.entries)} entries")
+
+    # Get embedding dimension
+    embedding_dim = emb.get_embedding_dim()
+    if embedding_dim is None:
+        raise HTTPException(status_code=503, detail="Embedding model not loaded")
+
+    embedded_entries = []
+    for entry in request.entries:
+        # Generate embedding
+        embedding = emb.get_embedding(entry.text)
+        if embedding is None:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate embedding for: {entry.text[:50]}"
+            )
+
+        embedded_entries.append(EmbedEntryResponse(
+            text=entry.text,
+            intent=entry.intent,
+            entity_ids=entry.entity_ids,
+            slots=entry.slots,
+            embedding=embedding.tolist(),
+            generated=True,
+        ))
+
+    logger.info(f"Embed: generated {len(embedded_entries)} embeddings (dim={embedding_dim})")
+
+    return EmbedResponse(
+        entries=embedded_entries,
+        embedding_model=EMBEDDING_MODEL,
+        embedding_dim=embedding_dim,
     )
 
 

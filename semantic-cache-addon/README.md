@@ -6,7 +6,7 @@ Home Assistant addon providing semantic cache lookup and CrossEncoder reranking 
 
 - **Semantic Cache Lookup** - Fast command resolution via vector + BM25 hybrid search
 - **CrossEncoder Reranking** - Precise semantic validation
-- **GPU Acceleration** - NVIDIA, AMD, Apple Silicon support
+- **GPU Acceleration** - NVIDIA CUDA, Apple Silicon (MPS) support
 - **Local Models** - No external API dependencies
 
 ## Installation
@@ -84,6 +84,39 @@ Response:
   "scores": [0.89, 0.32],
   "best_index": 0,
   "best_score": 0.89
+}
+```
+
+### Embed (generate cache entries)
+```
+POST /embed
+{
+  "entries": [
+    {
+      "text": "Schalte Licht im Bad an",
+      "intent": "HassTurnOn",
+      "entity_ids": ["light.bad"],
+      "slots": {"area": "Bad", "domain": "light"}
+    }
+  ]
+}
+```
+
+Response:
+```json
+{
+  "entries": [
+    {
+      "text": "Schalte Licht im Bad an",
+      "intent": "HassTurnOn",
+      "entity_ids": ["light.bad"],
+      "slots": {"area": "Bad", "domain": "light"},
+      "embedding": [0.123, -0.456, ...],
+      "generated": true
+    }
+  ],
+  "embedding_model": "BAAI/bge-m3",
+  "embedding_dim": 1024
 }
 ```
 
