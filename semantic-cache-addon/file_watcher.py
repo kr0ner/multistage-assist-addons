@@ -86,6 +86,7 @@ class CacheFileWatcher:
         self._observer: Optional[Observer] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._running = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Track file modification times for polling
         self._last_mtimes: Dict[str, float] = {}
@@ -100,6 +101,7 @@ class CacheFileWatcher:
             return
 
         self._running = True
+        self._loop = asyncio.get_running_loop()
         logger.info(f"Starting file watcher for: {self._file_paths}")
 
         # Initialize modification times for existing files
@@ -151,8 +153,11 @@ class CacheFileWatcher:
     def _on_file_change(self, path: str) -> None:
         """Handle file change notification from watchdog."""
         # Schedule debounced reload in the async context
-        asyncio.get_event_loop().call_soon_threadsafe(
-            lambda: asyncio.create_task(self._schedule_reload(path))
+        if self._loop is None:
+            logger.warning("Event loop not set, skipping file change")
+            return
+        self._loop.call_soon_threadsafe(
+            lambda: self._loop.create_task(self._schedule_reload(path))
         )
 
     async def _schedule_reload(self, changed_path: str) -> None:
