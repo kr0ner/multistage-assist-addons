@@ -97,10 +97,20 @@ class CacheLoader:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            entries = data.get("entries", [])
+            # Debug: show what keys are in the JSON
+            if isinstance(data, dict):
+                logger.debug("JSON keys in %s: %s", path.name, list(data.keys()))
+            elif isinstance(data, list):
+                logger.debug("JSON is a list with %d items in %s", len(data), path.name)
+
+            # Support both 'entries' (user cache) and 'anchors' (generated anchors) keys
+            entries = []
+            if isinstance(data, dict):
+                entries = data.get("entries", []) or data.get("anchors", [])
+            logger.debug("Found %d entries in JSON", len(entries))
             count = 0
 
-            for entry_data in entries:
+            for i, entry_data in enumerate(entries):
                 try:
                     # Remove legacy fields that might cause errors
                     entry_data.pop("is_anchor", None)
@@ -110,7 +120,7 @@ class CacheLoader:
                     self._cache.append(entry)
                     count += 1
                 except Exception as e:
-                    logger.warning("Failed to load entry: %s", e)
+                    logger.warning("Failed to load entry %d: %s - data: %s", i, e, str(entry_data)[:200])
 
             return count
 
