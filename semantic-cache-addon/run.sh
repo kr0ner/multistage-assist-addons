@@ -51,5 +51,9 @@ export HF_HOME="$HF_HOME_PATH"
 export TRANSFORMERS_CACHE="$HF_HOME_PATH"
 export SENTENCE_TRANSFORMERS_HOME="$HF_HOME_PATH"
 
+# Disable problematic HuggingFace features
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_ENABLE_HF_TRANSFER=0
+
 # Start the FastAPI server
 exec python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT"
