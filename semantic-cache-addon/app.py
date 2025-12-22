@@ -127,6 +127,19 @@ class EmbedResponse(BaseModel):
     embedding_dim: int
 
 
+class EmbedTextRequest(BaseModel):
+    """Request body for embedding a single text."""
+    text: str
+
+
+class EmbedTextResponse(BaseModel):
+    """Response with text embedding."""
+    text: str
+    embedding: List[float]
+    embedding_model: str
+    embedding_dim: int
+
+
 # ============================================================================
 # Device Detection & Model Loading
 # ============================================================================
@@ -525,6 +538,42 @@ async def embed(request: EmbedRequest):
 
     return EmbedResponse(
         entries=embedded_entries,
+        embedding_model=EMBEDDING_MODEL,
+        embedding_dim=embedding_dim,
+    )
+
+
+@app.post("/embed/text", response_model=EmbedTextResponse)
+async def embed_text(request: EmbedTextRequest):
+    """
+    Generate embedding for a single text string.
+
+    Simple endpoint for embedding individual texts.
+    """
+    if loading:
+        raise HTTPException(status_code=503, detail="Still loading")
+
+    if not request.text:
+        raise HTTPException(status_code=400, detail="No text provided")
+
+    logger.debug(f"Embed text: '{request.text[:60]}'")
+
+    # Get embedding dimension
+    embedding_dim = emb.get_embedding_dim()
+    if embedding_dim is None:
+        raise HTTPException(status_code=503, detail="Embedding model not loaded")
+
+    # Generate embedding
+    embedding = emb.get_embedding(request.text)
+    if embedding is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate embedding"
+        )
+
+    return EmbedTextResponse(
+        text=request.text,
+        embedding=embedding.tolist(),
         embedding_model=EMBEDDING_MODEL,
         embedding_dim=embedding_dim,
     )
