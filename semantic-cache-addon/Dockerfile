@@ -13,7 +13,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     watchdog>=4.0.0 \
     sentence-transformers>=2.2.0 \
     rank-bm25>=0.2.2 \
-    aiohttp>=3.9.0
+    aiohttp>=3.9.0 \
+    einops
 
 # Copy application files
 COPY app.py /app.py

@@ -163,23 +163,26 @@ def detect_best_device() -> str:
 
 
 def load_reranker_on_device(model_name: str, device: str) -> CrossEncoder:
-    """Load CrossEncoder on the specified device."""
+    """Load CrossEncoder on the specified device with remote code trust."""
+    # Jina V2 and other modern models require custom code execution to load correctly
+    kwargs = {"trust_remote_code": True}
+
     if device == "mps":
         try:
-            return CrossEncoder(model_name, device="mps")
+            return CrossEncoder(model_name, device="mps", **kwargs)
         except Exception as e:
             logger.warning(f"MPS failed: {e}, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu")
+            return CrossEncoder(model_name, device="cpu", **kwargs)
 
     elif device == "cuda":
         try:
-            return CrossEncoder(model_name, device="cuda")
+            return CrossEncoder(model_name, device="cuda", **kwargs)
         except Exception as e:
             logger.warning(f"CUDA failed: {e}, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu")
+            return CrossEncoder(model_name, device="cpu", **kwargs)
 
     else:
-        return CrossEncoder(model_name, device="cpu")
+        return CrossEncoder(model_name, device="cpu", **kwargs)
 
 
 # ============================================================================
