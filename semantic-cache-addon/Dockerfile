@@ -14,6 +14,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     sentence-transformers>=2.2.0 \
     rank-bm25>=0.2.2 \
     aiohttp>=3.9.0 \
+    "transformers<4.45" \
     einops
 
 # Copy application files
