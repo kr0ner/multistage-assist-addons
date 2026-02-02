@@ -27,7 +27,7 @@ from file_watcher import CacheFileWatcher
 import embedding as emb
 
 # Configuration from environment (set by run.sh from addon options)
-RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 DEVICE = os.getenv("RERANKER_DEVICE", "cpu")
 ANCHORS_FILE = os.getenv("ANCHORS_FILE", "/homeassistant/.storage/multistage_assist_anchors.json")
@@ -164,6 +164,20 @@ def detect_best_device() -> str:
 
 def load_reranker_on_device(model_name: str, device: str) -> CrossEncoder:
     """Load CrossEncoder on the specified device with remote code trust."""
+    if "openvino" in device.lower():
+        from openvino_wrapper import OpenVINOReranker
+        # Format: "openvino:GPU" or just "openvino" (default GPU)
+        ov_device = "GPU"
+        if ":" in device:
+            ov_device = device.split(":")[1]
+        
+        try:
+            return OpenVINOReranker(model_name, device=ov_device)
+        except Exception as e:
+            logger.error(f"OpenVINO init failed: {e}")
+            logger.warning("Falling back to CPU CrossEncoder")
+            return CrossEncoder(model_name, device="cpu", trust_remote_code=True)
+
     # Jina V2 and other modern models require custom code execution to load correctly
     kwargs = {"trust_remote_code": True}
 

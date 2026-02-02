@@ -1,5 +1,5 @@
 name: "Semantic Cache Add-on"
-version: "1.0.13"
+version: "1.0.14"
 slug: "semantic_cache"
 description: "Semantic cache lookup + CrossEncoder reranker for Multi-Stage Assist"
 url: "https://github.com/kr0ner/semantic-cache-addon"
@@ -18,9 +18,9 @@ ports:
 ports_description:
   9876/tcp: "Cache & Reranker API"
 options:
-  reranker_model: "BAAI/bge-reranker-base"
+  reranker_model: "BAAI/bge-reranker-v2-m3"
   embedding_model: "BAAI/bge-m3"
-  device: "auto"
+  device: "openvino:GPU"
   port: 9876
   HF_HOME: "/share/semantic-cache"
   anchors_file: "/homeassistant/.storage/multistage_assist_anchors.json"

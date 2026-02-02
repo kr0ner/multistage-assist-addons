@@ -7,13 +7,19 @@ RUN apt-get update && apt-get install -y \
     jq && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
-RUN pip3 install --no-cache-dir --break-system-packages \
-    fastapi==0.109.0 \
-    uvicorn==0.27.0 \
-    watchdog>=4.0.0 \
-    sentence-transformers>=2.2.0 \
-    rank-bm25>=0.2.2 \
-    aiohttp>=3.9.0 \
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    pydantic \
+    sentence-transformers \
+    torch \
+    numpy \
+    python-multipart \
+    watchdog \
+    aiofiles \
+    rank_bm25 \
+    optimum[openvino] \
+    nncf \
     "transformers<4.45" \
     einops
 
