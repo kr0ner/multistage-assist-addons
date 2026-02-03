@@ -28,13 +28,13 @@ import embedding as emb
 
 # Configuration from environment (set by run.sh from addon options)
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 DEVICE = os.getenv("RERANKER_DEVICE", "cpu")
 ANCHORS_FILE = os.getenv("ANCHORS_FILE", "/homeassistant/.storage/multistage_assist_anchors.json")
 USER_CACHE_FILE = os.getenv("USER_CACHE_FILE", "/homeassistant/.storage/multistage_assist_semantic_cache.json")
 
 # Hybrid search config
-HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.7"))  # Weight for semantic vs BM25
+HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.6"))  # Weight for semantic vs BM25
 HYBRID_NGRAM_SIZE = int(os.getenv("HYBRID_NGRAM_SIZE", "2"))
 VECTOR_THRESHOLD = float(os.getenv("VECTOR_THRESHOLD", "0.5"))
 VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "10"))
@@ -163,40 +163,55 @@ def detect_best_device() -> str:
 
 
 def load_reranker_on_device(model_name: str, device: str) -> CrossEncoder:
-    """Load CrossEncoder on the specified device with remote code trust."""
-    if "openvino" in device.lower():
-        from openvino_wrapper import OpenVINOReranker
-        # Format: "openvino:GPU" or just "openvino" (default GPU)
-        ov_device = "GPU"
-        if ":" in device:
-            ov_device = device.split(":")[1]
+    # CPU path with INT8 quantization (NUC optimization)
+    if device == "cpu":
+        # Cache path for serialized quantized model
+        safe_name = model_name.replace("/", "_").replace("-", "_")
+        cache_path = os.path.join(os.getenv("HF_HOME", "/share/semantic-cache"), f"{safe_name}_quantized.pt")
         
+        # 1. Try Loading Cached Model (Fast & Low RAM)
+        if os.path.exists(cache_path):
+            logger.info(f"Loading cached quantized model from {cache_path}...")
+            try:
+                model = torch.load(cache_path)
+                logger.info("✅ Cached Int8 Model Loaded.")
+                return model
+            except Exception as e:
+                logger.warning(f"Failed to load cached model (corruption?): {e}")
+                os.remove(cache_path) # Delete corrupt file
+
+        # 2. Create & Cache Model (High RAM - One Time)
+        logger.info(f"⚡ NUC MODE: Loading {model_name} with INT8 Quantization...")
         try:
-            return OpenVINOReranker(model_name, device=ov_device)
+            # Load the full FP32 model
+            model = CrossEncoder(model_name, device="cpu", trust_remote_code=True)
+            
+            # Apply Dynamic Quantization
+            model.model = torch.quantization.quantize_dynamic(
+                model.model,
+                {torch.nn.Linear},
+                dtype=torch.qint8
+            )
+            
+            # Warmup
+            logger.info("Warming up...")
+            model.predict([["warmup", "warmup"]])
+            
+            # Save to disk for next time
+            logger.info(f"Saving quantized model to {cache_path}...")
+            torch.save(model, cache_path)
+            
+            logger.info(f"✅ Model Quantized & Ready.")
+            return model
+            
         except Exception as e:
-            logger.error(f"OpenVINO init failed: {e}")
-            logger.warning("Falling back to CPU CrossEncoder")
+            logger.error(f"Quantization failed: {e}")
+            logger.warning("Falling back to standard FP32 CPU model")
             return CrossEncoder(model_name, device="cpu", trust_remote_code=True)
 
-    # Jina V2 and other modern models require custom code execution to load correctly
+    # GPU paths (CUDA, MPS)
     kwargs = {"trust_remote_code": True}
-
-    if device == "mps":
-        try:
-            return CrossEncoder(model_name, device="mps", **kwargs)
-        except Exception as e:
-            logger.warning(f"MPS failed: {e}, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu", **kwargs)
-
-    elif device == "cuda":
-        try:
-            return CrossEncoder(model_name, device="cuda", **kwargs)
-        except Exception as e:
-            logger.warning(f"CUDA failed: {e}, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu", **kwargs)
-
-    else:
-        return CrossEncoder(model_name, device="cpu", **kwargs)
+    return CrossEncoder(model_name, device="cpu", **kwargs)
 
 
 # ============================================================================

@@ -7,9 +7,9 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional
 
 
-# Default models
-DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"  # sentence-transformers compatible
-DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-base"
+# Default models (NUC-optimized)
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Fast (118M params)
+DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"  # Smart (560M params, INT8 quantized on CPU)
 
 # Configuration defaults
 DEFAULT_RERANKER_THRESHOLD = 0.70  # Fallback for unknown domains

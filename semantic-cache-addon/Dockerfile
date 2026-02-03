@@ -18,8 +18,6 @@ RUN pip install --no-cache-dir \
     watchdog \
     aiofiles \
     rank_bm25 \
-    optimum[openvino] \
-    nncf \
     "transformers<4.45" \
     einops
 
