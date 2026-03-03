@@ -1,5 +1,5 @@
 name: "Semantic Cache Add-on"
-version: "1.0.16"
+version: "1.0.17"
 slug: "semantic_cache"
 description: "Semantic cache lookup + CrossEncoder reranker for Multi-Stage Assist"
 url: "https://github.com/kr0ner/semantic-cache-addon"
@@ -31,7 +31,7 @@ options:
   reranker_threshold: 0.73
   hybrid_ngram_size: 2
 schema:
-  reranker_model: str
+  reranker_model: "str?"
   embedding_model: str
   device: list(auto|cpu|cuda|mps)
   port: int
