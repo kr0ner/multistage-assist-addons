@@ -37,7 +37,29 @@ def load_embedding_model(model_name: str = "BAAI/bge-m3", device: str = "cpu"):
         from sentence_transformers import SentenceTransformer
 
         logger.info("Downloading/loading model weights...")
-        _embedding_model = SentenceTransformer(model_name, device=device)
+        
+        # 1. Attempt to disable token_type_ids natively during initialization
+        try:
+            _embedding_model = SentenceTransformer(
+                model_name, 
+                device=device,
+                tokenizer_kwargs={"return_token_type_ids": False}
+            )
+        except TypeError:
+            # Fallback if the sentence-transformers version doesn't support tokenizer_kwargs
+            _embedding_model = SentenceTransformer(model_name, device=device)
+
+        # 2. Hard-patch the tokenizer to ensure DistilBERT doesn't crash
+        try:
+            transformer_module = _embedding_model[0]
+            # Verify if the underlying model architecture is DistilBERT
+            if hasattr(transformer_module, 'auto_model') and transformer_module.auto_model.config.model_type == "distilbert":
+                if hasattr(transformer_module, 'tokenizer') and "token_type_ids" in transformer_module.tokenizer.model_input_names:
+                    # Remove token_type_ids so it isn't passed to the forward pass
+                    transformer_module.tokenizer.model_input_names.remove("token_type_ids")
+                    logger.info("Patched DistilBERT tokenizer: Removed 'token_type_ids' from model inputs.")
+        except Exception as patch_error:
+            logger.debug(f"Could not apply tokenizer patch: {patch_error}")
 
         _embedding_model_name = model_name
         logger.info("Embedding model loaded successfully")
