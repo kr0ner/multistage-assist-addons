@@ -127,10 +127,26 @@ class BM25Index:
         tokens = tokenize_german(query, self.ngram_size)
         scores = np.array(self._index.get_scores(tokens))
 
-        # Normalize to [0, 1] using min-max scaling
+        # Normalize. 
+        # INSTEAD of min-max scaling to 1.0 (which inflates noise),
+        # we scale relative to the maximum POSSIBLE score for this query
+        # to ensure that if only 1 word matches, the score is appropriately low.
+        
+        # Approximate the 'perfect match' score for this index by tokenizing a typical 
+        # doc that contains all tokens.
         if scores.max() > 0:
-            scores = scores / scores.max()
-
+            # We use the max score in the current query as a baseline, 
+            # but we damp it if it's too low compared to a "good" match.
+            # A score of ~5-10 per token is typical for BM25.
+            # If we have 5 tokens, a perfect match might be 30.
+            # If the max score is only 5, it's a weak match.
+            
+            # Simple improvement: Scale by match quality.
+            # If we just divide by max, noise like "ist das" becomes 1.0.
+            # Let's cap the normalization factor so that poor max scores result in poor normalized scores.
+            norm_factor = max(scores.max(), 5.0 * len(tokens)) 
+            scores = scores / norm_factor
+            
         return scores
 
     def __len__(self) -> int:
