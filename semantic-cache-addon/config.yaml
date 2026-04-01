@@ -1,7 +1,7 @@
 name: "Semantic Cache Add-on"
-version: "1.0.19"
+version: "1.0.20"
 slug: "semantic_cache"
-description: "Semantic cache lookup + CrossEncoder reranker for Multi-Stage Assist"
+description: "Semantic cache lookup for Multi-Stage Assist"
 url: "https://github.com/kr0ner/semantic-cache-addon"
 arch:
   - amd64
@@ -16,22 +16,19 @@ map:
 ports:
   9876/tcp: 9876
 ports_description:
-  9876/tcp: "Cache & Reranker API"
+  9876/tcp: "Cache API"
 options:
-  reranker_model: "BAAI/bge-reranker-v2-m3"
-  embedding_model: "BAAI/bge-m3"
+  embedding_model: "/share/semantic-cache/models/bge-m3-smart-cache"
   device: "cpu"
   port: 9876
   HF_HOME: "/share/semantic-cache"
   anchors_file: "/homeassistant/.storage/multistage_assist_anchors.json"
   user_cache_file: "/homeassistant/.storage/multistage_assist_semantic_cache.json"
-  hybrid_alpha: 0.6
+  hybrid_alpha: 1.0
   vector_threshold: 0.5
   vector_top_k: 10
-  reranker_threshold: 0.73
   hybrid_ngram_size: 2
 schema:
-  reranker_model: "str?"
   embedding_model: str
   device: list(auto|cpu|cuda|mps)
   port: int
@@ -41,5 +38,4 @@ schema:
   hybrid_alpha: float
   vector_threshold: float
   vector_top_k: int
-  reranker_threshold: float
   hybrid_ngram_size: int

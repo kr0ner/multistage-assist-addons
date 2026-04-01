@@ -1,11 +1,10 @@
 """
-Semantic Cache & Reranker API.
+Semantic Cache API.
 
 Home Assistant addon that provides:
-1. CrossEncoder reranking API (/rerank)
-2. Full semantic cache lookup (/lookup)
+1. Full semantic cache lookup (/lookup)
 
-Combines BM25 keyword search with vector similarity and reranking
+Combines BM25 keyword search with vector similarity
 for fast, accurate command resolution.
 """
 
@@ -18,7 +17,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from sentence_transformers import CrossEncoder
 
 from cache_types import CacheEntry, DOMAIN_THRESHOLDS
 from cache_loader import CacheLoader
@@ -27,9 +25,8 @@ from file_watcher import CacheFileWatcher
 import embedding as emb
 
 # Configuration from environment (set by run.sh from addon options)
-RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
-DEVICE = os.getenv("RERANKER_DEVICE", "cpu")
+DEVICE = os.getenv("RERANKER_DEVICE", "cpu")  # Key kept for compatibility
 ANCHORS_FILE = os.getenv("ANCHORS_FILE", "/homeassistant/.storage/multistage_assist_anchors.json")
 USER_CACHE_FILE = os.getenv("USER_CACHE_FILE", "/homeassistant/.storage/multistage_assist_semantic_cache.json")
 
@@ -38,7 +35,6 @@ HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.7"))  # Weight for semantic vs
 HYBRID_NGRAM_SIZE = int(os.getenv("HYBRID_NGRAM_SIZE", "2"))
 VECTOR_THRESHOLD = float(os.getenv("VECTOR_THRESHOLD", "0.5"))
 VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "10"))
-RERANKER_THRESHOLD = float(os.getenv("RERANKER_THRESHOLD", "0.73"))
 
 # Setup logging
 logging.basicConfig(
@@ -52,13 +48,12 @@ logging.getLogger("watchdog").setLevel(logging.WARNING)
 
 # Initialize FastAPI
 app = FastAPI(
-    title="Semantic Cache & Reranker API",
-    description="Cache lookup + CrossEncoder reranking for Multi-Stage Assist",
-    version="2.0.0",
+    title="Semantic Cache API",
+    description="Cache lookup for Multi-Stage Assist",
+    version="2.1.0",
 )
 
 # Global state
-reranker_model: CrossEncoder = None
 cache_loader: CacheLoader = None
 bm25_index: BM25Index = None
 file_watcher: CacheFileWatcher = None
@@ -68,19 +63,6 @@ loading = True
 # ============================================================================
 # Request/Response Models
 # ============================================================================
-
-class RerankRequest(BaseModel):
-    """Request body for reranking."""
-    query: str
-    candidates: List[str]
-
-
-class RerankResponse(BaseModel):
-    """Response with reranking scores."""
-    scores: List[float]
-    best_index: int
-    best_score: float
-
 
 class LookupRequest(BaseModel):
     """Request body for cache lookup."""
@@ -162,26 +144,6 @@ def detect_best_device() -> str:
     return "cpu"
 
 
-def load_reranker_on_device(model_name: str, device: str) -> CrossEncoder:
-    """Load CrossEncoder on the specified device."""
-    if device == "mps":
-        try:
-            return CrossEncoder(model_name, device="mps")
-        except Exception as e:
-            logger.warning(f"MPS failed: {e}, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu")
-
-    elif device == "cuda":
-        try:
-            return CrossEncoder(model_name, device="cuda")
-        except Exception as e:
-            logger.warning(f"CUDA failed: {e}, falling back to CPU")
-            return CrossEncoder(model_name, device="cpu")
-
-    else:
-        return CrossEncoder(model_name, device="cpu")
-
-
 # ============================================================================
 # Numeric Value Normalization
 # ============================================================================
@@ -253,12 +215,11 @@ def reload_cache() -> None:
 @app.on_event("startup")
 async def startup():
     """Load all models and cache on startup."""
-    global reranker_model, cache_loader, bm25_index, file_watcher, loading
+    global cache_loader, bm25_index, file_watcher, loading
 
     logger.info("=" * 60)
-    logger.info("STARTING SEMANTIC CACHE & RERANKER ADDON")
+    logger.info("STARTING SEMANTIC CACHE API")
     logger.info("=" * 60)
-    logger.info(f"Reranker model: {RERANKER_MODEL}")
     logger.info(f"Embedding model: {EMBEDDING_MODEL}")
     logger.info(f"Device: {DEVICE}")
     logger.info(f"Anchors file: {ANCHORS_FILE}")
@@ -270,14 +231,6 @@ async def startup():
     if DEVICE == "auto":
         actual_device = detect_best_device()
         logger.info(f"Auto-detected device: {actual_device}")
-
-    # Load reranker
-    if RERANKER_MODEL and RERANKER_MODEL.strip():
-        logger.info("Loading reranker model...")
-        reranker_model = load_reranker_on_device(RERANKER_MODEL, actual_device)
-        logger.info("Reranker model loaded")
-    else:
-        logger.info("Reranker model is empty. Reranking is disabled.")
 
     # Load embedding model
     logger.info("Loading embedding model...")
@@ -307,7 +260,7 @@ async def startup():
 
     loading = False
     logger.info("=" * 60)
-    logger.info("READY! Endpoints: /health, /rerank, /lookup")
+    logger.info("READY! Endpoints: /health, /lookup")
     logger.info("=" * 60)
 
 
@@ -333,41 +286,11 @@ async def health():
     last_reload = cache_loader.last_reload_time if cache_loader else None
     return {
         "status": "loading" if loading else "ok",
-        "reranker_model": RERANKER_MODEL,
         "embedding_model": EMBEDDING_MODEL,
         "device": DEVICE,
         "cache_entries": cache_entries,
         "last_reload": last_reload,
     }
-
-
-@app.post("/rerank", response_model=RerankResponse)
-async def rerank(request: RerankRequest):
-    """Rerank candidates against a query."""
-    if loading:
-        raise HTTPException(status_code=503, detail="Still loading")
-    if reranker_model is None:
-        raise HTTPException(status_code=503, detail="Reranker is disabled (model not set)")
-
-    if not request.candidates:
-        raise HTTPException(status_code=400, detail="No candidates provided")
-
-    logger.info(f"Rerank: query='{request.query[:50]}' candidates={len(request.candidates)}")
-
-    pairs = [[request.query, c] for c in request.candidates]
-    raw_scores = reranker_model.predict(pairs)
-    probs = 1 / (1 + np.exp(-raw_scores))
-
-    scores = probs.tolist()
-    best_idx = int(np.argmax(probs))
-
-    logger.info(f"Rerank result: best_idx={best_idx}, best_score={probs[best_idx]:.4f}")
-
-    return RerankResponse(
-        scores=scores,
-        best_index=best_idx,
-        best_score=float(probs[best_idx]),
-    )
 
 
 @app.post("/lookup", response_model=LookupResponse)
@@ -451,33 +374,9 @@ async def lookup(request: LookupRequest):
 
     logger.debug(f"Found {len(candidates)} candidates (top: {candidates[0][0]:.3f})")
 
-    # Stage 2: Reranking
-    if reranker_model is not None:
-        pairs = [[query_norm, c[2].text] for c in candidates]
-        raw_scores = reranker_model.predict(pairs)
-        probs = 1 / (1 + np.exp(-raw_scores))
-    
-        best_idx = int(np.argmax(probs))
-        best_prob = float(probs[best_idx])
-    
-        logger.debug(f"Reranker: best_idx={best_idx}, best_score={best_prob:.4f}")
-    
-        # Get domain-specific threshold
-        _, cache_idx, entry = candidates[best_idx]
-        domain = None
-        if entry.entity_ids:
-            parts = entry.entity_ids[0].split(".")
-            if len(parts) > 1:
-                domain = parts[0]
-        threshold = DOMAIN_THRESHOLDS.get(domain, RERANKER_THRESHOLD)
-    
-        if best_prob < threshold:
-            logger.info(f"Reranker blocked: {best_prob:.4f} < {threshold:.4f} (domain={domain})")
-            return LookupResponse(found=False, score=best_prob)
-    else:
-        # Bypass reranker
-        best_prob, cache_idx, entry = candidates[0]
-        logger.debug(f"Reranker bypassed: top match score={best_prob:.4f}")
+    # Selection: take top candidate
+    best_prob, cache_idx, entry = candidates[0]
+    logger.debug(f"Standalone lookup: top match score={best_prob:.4f}")
 
     # Success! Build response
     slots = dict(entry.slots) if entry.slots else {}
@@ -501,7 +400,7 @@ async def lookup(request: LookupRequest):
         slots=slots,
         score=best_prob,
         original_text=entry.text,
-        reranked=(reranker_model is not None),
+        reranked=False,
     )
 
 

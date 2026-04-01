@@ -5,7 +5,6 @@ set -e
 CONFIG_PATH=/data/options.json
 
 # Model settings
-RERANKER_MODEL=$(jq -r '.reranker_model' $CONFIG_PATH)
 EMBEDDING_MODEL=$(jq -r '.embedding_model' $CONFIG_PATH)
 DEVICE=$(jq -r '.device' $CONFIG_PATH)
 PORT=$(jq -r '.port' $CONFIG_PATH)
@@ -20,10 +19,8 @@ HYBRID_ALPHA=$(jq -r '.hybrid_alpha' $CONFIG_PATH)
 HYBRID_NGRAM_SIZE=$(jq -r '.hybrid_ngram_size' $CONFIG_PATH)
 VECTOR_THRESHOLD=$(jq -r '.vector_threshold' $CONFIG_PATH)
 VECTOR_TOP_K=$(jq -r '.vector_top_k' $CONFIG_PATH)
-RERANKER_THRESHOLD=$(jq -r '.reranker_threshold' $CONFIG_PATH)
 
-echo "[INFO] Starting Semantic Cache & Reranker addon..."
-echo "[INFO] Reranker model: $RERANKER_MODEL"
+echo "[INFO] Starting Semantic Cache addon..."
 echo "[INFO] Embedding model: $EMBEDDING_MODEL"
 echo "[INFO] Device: $DEVICE"
 echo "[INFO] Port: $PORT"
@@ -35,7 +32,6 @@ echo "[INFO] User cache file: $USER_CACHE_FILE"
 mkdir -p "$HF_HOME_PATH"
 
 # Export as environment variables
-export RERANKER_MODEL="$RERANKER_MODEL"
 export EMBEDDING_MODEL="$EMBEDDING_MODEL"
 export RERANKER_DEVICE="$DEVICE"
 export ANCHORS_FILE="$ANCHORS_FILE"
@@ -44,7 +40,6 @@ export HYBRID_ALPHA="$HYBRID_ALPHA"
 export HYBRID_NGRAM_SIZE="$HYBRID_NGRAM_SIZE"
 export VECTOR_THRESHOLD="$VECTOR_THRESHOLD"
 export VECTOR_TOP_K="$VECTOR_TOP_K"
-export RERANKER_THRESHOLD="$RERANKER_THRESHOLD"
 
 # Set HuggingFace cache paths
 export HF_HOME="$HF_HOME_PATH"
