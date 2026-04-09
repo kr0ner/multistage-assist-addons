@@ -19,6 +19,8 @@ HYBRID_ALPHA=$(jq -r '.hybrid_alpha' $CONFIG_PATH)
 HYBRID_NGRAM_SIZE=$(jq -r '.hybrid_ngram_size' $CONFIG_PATH)
 VECTOR_THRESHOLD=$(jq -r '.vector_threshold' $CONFIG_PATH)
 VECTOR_TOP_K=$(jq -r '.vector_top_k' $CONFIG_PATH)
+PRODUCTION_MODE=$(jq -r '.production_mode' $CONFIG_PATH)
+PROD_CACHE_KEY=$(jq -r '.prod_cache_key' $CONFIG_PATH)
 
 echo "[INFO] Starting Semantic Cache addon..."
 echo "[INFO] Embedding model: $EMBEDDING_MODEL"
@@ -40,6 +42,8 @@ export HYBRID_ALPHA="$HYBRID_ALPHA"
 export HYBRID_NGRAM_SIZE="$HYBRID_NGRAM_SIZE"
 export VECTOR_THRESHOLD="$VECTOR_THRESHOLD"
 export VECTOR_TOP_K="$VECTOR_TOP_K"
+export PRODUCTION_MODE="$PRODUCTION_MODE"
+export PROD_CACHE_KEY="$PROD_CACHE_KEY"
 
 # Set HuggingFace cache paths
 export HF_HOME="$HF_HOME_PATH"

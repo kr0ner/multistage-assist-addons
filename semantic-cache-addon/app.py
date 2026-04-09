@@ -31,10 +31,14 @@ ANCHORS_FILE = os.getenv("ANCHORS_FILE", "/homeassistant/.storage/multistage_ass
 USER_CACHE_FILE = os.getenv("USER_CACHE_FILE", "/homeassistant/.storage/multistage_assist_semantic_cache.json")
 
 # Hybrid search config
-HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.7"))  # Weight for semantic vs BM25
+HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.95"))
 HYBRID_NGRAM_SIZE = int(os.getenv("HYBRID_NGRAM_SIZE", "2"))
 VECTOR_THRESHOLD = float(os.getenv("VECTOR_THRESHOLD", "0.5"))
 VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "10"))
+
+# Security config for cache modification
+PRODUCTION_MODE = os.getenv("PRODUCTION_MODE", "true").lower() == "true"
+PROD_CACHE_KEY = os.getenv("PROD_CACHE_KEY", "")
 
 # Setup logging
 logging.basicConfig(
@@ -64,10 +68,40 @@ loading = True
 # Request/Response Models
 # ============================================================================
 
+# Language constants aligned with german_utils.py
+GERMAN_ARTICLES = {"der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "einer", "eines"}
+GERMAN_PREPOSITIONS = {"im", "in", "auf", "unter", "über", "am", "bei", "zum", "zur", "vom", "von", "für", "mit", "nach"}
+FILLER_WORDS = {"bitte", "mal", "gerne", "doch", "kannst", "könntest", "würdest"}
+
+def normalize_umlauts(text: str) -> str:
+    """Normalize German umlauts and ß to ASCII equivalents."""
+    return text.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+
+def canonicalize(text: str) -> str:
+    """Standardize text: lower, ASCII-umlauts, remove special chars."""
+    if not text: return ""
+    import unicodedata
+    t = unicodedata.normalize('NFC', text.lower())
+    t = normalize_umlauts(t)
+    t = re.sub(r"[^\w\s%°]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+def strip_filler_words(text: str) -> str:
+    """Strip meaningless filler words while preserving grammar."""
+    tokens = text.split()
+    return " ".join([w for w in tokens if w.lower() not in FILLER_WORDS]).strip()
+
 class LookupRequest(BaseModel):
     """Request body for cache lookup."""
     query: str
 
+
+class Candidate(BaseModel):
+    """A search candidate for debugging."""
+    text: str
+    score: float
+    intent: Optional[str] = None
+    entity_ids: List[str] = []
 
 class LookupResponse(BaseModel):
     """Response from cache lookup."""
@@ -78,6 +112,7 @@ class LookupResponse(BaseModel):
     score: float = 0.0
     original_text: Optional[str] = None
     reranked: bool = False
+    candidates: List[Candidate] = []
 
 
 class EmbedEntryRequest(BaseModel):
@@ -149,38 +184,42 @@ def detect_best_device() -> str:
 # ============================================================================
 
 def normalize_numeric_value(text: str) -> Tuple[str, List[Any]]:
-    """
-    Normalize numeric values in text for generalized cache lookup.
+    """Normalize text for semantic cache matching, aligned with main app centroids."""
+    if not text: return "", []
+    
+    # Standard Canonicalization
+    text_norm = canonicalize(text)
+    extracted: List[Any] = []
 
-    Returns: (normalized_text, extracted_values)
-    Example: "Setze Rollo auf 75%" -> ("Setze Rollo auf 50 Prozent", [75])
-    """
-    extracted = []
-
-    def replace_percent(match):
-        val = match.group(1)
-        extracted.append(int(val))
-        return "50 Prozent"
-
+    # 1. Number Centroids (Principle 7)
+    def replace_pct(match):
+        extracted.append(int(match.group(1)))
+        return "50 prozent"
     def replace_temp(match):
-        val = match.group(1)
-        try:
-            if "." in val or "," in val:
-                extracted.append(float(val.replace(",", ".")))
-            else:
-                extracted.append(int(val))
-        except ValueError:
-            pass
-        return "21 Grad"
+        val = match.group(1).replace(",", ".")
+        extracted.append(float(val))
+        return "21 grad"
 
-    # Percentages: "75%", "75 %", "75 Prozent"
-    text_norm = re.sub(r"(\d+)\s*(?:%|Prozent|prozent)", replace_percent, text, flags=re.IGNORECASE)
+    text_norm = re.sub(r"(\d+)\s*(?:%|prozent)(?:\b|\s|$)", replace_pct, text_norm, flags=re.IGNORECASE)
+    text_norm = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:\u00b0|grad)\b", replace_temp, text_norm, flags=re.IGNORECASE)
 
-    # Temperatures: "23.5 Grad", "23°"
-    if text_norm == text:
-        text_norm = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:Grad|°|grad)", replace_temp, text_norm)
+    # 2. Time Centroids
+    text_norm = re.sub(r"\bin\s+(\d+|eine[rn]?)\s+(minuten?|stunden?|sekunden?)\b", "in 10 minuten", text_norm, flags=re.IGNORECASE)
+    text_norm = re.sub(r"\bfuer\s+(\d+|eine[rn]?)\s+(minuten?|stunden?|sekunden?)\b", "fuer 10 minuten", text_norm, flags=re.IGNORECASE)
+    text_norm = re.sub(r"\bauf\s+(\d+|eine[rn]?)\s+(minuten?|stunden?|sekunden?)\b", "auf 10 minuten", text_norm, flags=re.IGNORECASE)
+    text_norm = re.sub(r"\bum\s+(\d{1,2})(?:\s+\d{2})?\s*uhr\b", "um 10 uhr", text_norm, flags=re.IGNORECASE)
 
-    return text_norm, extracted
+    # 3. Fraction normalization ("haelfte" -> "50 prozent")
+    # Ported from german_utils.py
+    for fraction_word in ["haelfte", "halb", "viertel", "dreiviertel", "ganz", "voll"]:
+        pattern = r"\b" + fraction_word + r"\b"
+        if re.search(pattern, text_norm, flags=re.IGNORECASE):
+            text_norm = re.sub(pattern, "50 prozent", text_norm, flags=re.IGNORECASE)
+
+    # 4. Strip filler words
+    text_norm = strip_filler_words(text_norm)
+
+    return re.sub(r"\s+", " ", text_norm).strip(), extracted
 
 
 # ============================================================================
@@ -282,14 +321,14 @@ async def shutdown():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    cache_entries = len(cache_loader.entries) if cache_loader else 0
-    last_reload = cache_loader.last_reload_time if cache_loader else None
     return {
         "status": "loading" if loading else "ok",
+        "version": "2.1.0-normalization-fix",
         "embedding_model": EMBEDDING_MODEL,
         "device": DEVICE,
-        "cache_entries": cache_entries,
-        "last_reload": last_reload,
+        "cache_entries": len(cache_loader.entries) if cache_loader else 0,
+        "vector_threshold": VECTOR_THRESHOLD,
+        "last_reload": cache_loader.last_reload_time if cache_loader else None,
     }
 
 
@@ -318,8 +357,7 @@ async def lookup(request: LookupRequest):
 
     # Normalize query (handle percentages, temperatures)
     query_norm, extracted_values = normalize_numeric_value(query)
-    if query_norm != query:
-        logger.debug(f"Normalized: '{query}' -> '{query_norm}' [{extracted_values}]")
+    logger.debug(f"Lookup request: '{query}' -> Normalized: '{query_norm}' [{extracted_values}]")
 
     # Get query embedding
     query_emb = emb.get_embedding(query_norm)
@@ -327,10 +365,16 @@ async def lookup(request: LookupRequest):
         logger.warning("Failed to get embedding")
         return LookupResponse(found=False, score=0.0)
 
-    logger.debug(f"Query embedding dim: {query_emb.shape}, cache matrix: {cache_loader.embeddings_matrix.shape}")
-
     # Compute cosine similarity (embeddings are already normalized)
-    similarities = np.dot(cache_loader.embeddings_matrix, query_emb)
+    try:
+        if cache_loader.embeddings_matrix.shape[1] != query_emb.shape[0]:
+            logger.error(f"Dimension mismatch: cache={cache_loader.embeddings_matrix.shape[1]}, query={query_emb.shape[0]}")
+            return LookupResponse(found=False, score=0.0)
+            
+        similarities = np.dot(cache_loader.embeddings_matrix, query_emb)
+    except Exception as e:
+        logger.error(f"Similarity computation failed: {e}")
+        return LookupResponse(found=False, score=0.0)
 
     # Log top semantic match for debugging
     top_sem_idx = int(np.argmax(similarities))
@@ -372,14 +416,22 @@ async def lookup(request: LookupRequest):
     candidates.sort(key=lambda x: x[0], reverse=True)
     candidates = candidates[:VECTOR_TOP_K]
 
-    logger.debug(f"Found {len(candidates)} candidates (top: {candidates[0][0]:.3f})")
-
     # Selection: take top candidate
     best_prob, cache_idx, entry = candidates[0]
     logger.debug(f"Standalone lookup: top match score={best_prob:.4f}")
 
     # Success! Build response
     slots = dict(entry.slots) if entry.slots else {}
+    
+    # Candidates list
+    candidates_list = [
+        Candidate(
+            text=c[2].text,
+            score=float(c[0]),
+            intent=c[2].intent,
+            entity_ids=c[2].entity_ids
+        ) for c in candidates[:5]
+    ]
 
     # Inject extracted numeric values
     if extracted_values:
@@ -401,23 +453,38 @@ async def lookup(request: LookupRequest):
         score=best_prob,
         original_text=entry.text,
         reranked=False,
+        candidates=candidates_list
     )
 
 
-@app.post("/embed", response_model=EmbedResponse)
-async def embed(request: EmbedRequest):
-    """
-    Generate embeddings for cache entries.
+from fastapi import Header
 
-    Use this endpoint to create embeddings with the same model
-    used for cache lookup, ensuring consistency.
+@app.post("/embed", response_model=EmbedResponse)
+async def embed(request: EmbedRequest, authorization: Optional[str] = Header(None)):
+    """
+    Generate embeddings for cache entries (Production Lock protected).
     """
     if loading:
         raise HTTPException(status_code=503, detail="Still loading")
 
+    # Production Lock: Prevent tests or external callers from polluting the cache
+    if PRODUCTION_MODE:
+        if not PROD_CACHE_KEY:
+             raise HTTPException(status_code=500, detail="Reranker in production mode but no PROD_CACHE_KEY set")
+        if authorization != f"Bearer {PROD_CACHE_KEY}":
+             logger.warning(f"Unauthorized embed attempt from {authorization}")
+             raise HTTPException(status_code=403, detail="Not authorized to modify semantic cache")
+
     if not request.entries:
         raise HTTPException(status_code=400, detail="No entries provided")
 
+    # Access Control: Production Lock
+    if PRODUCTION_MODE:
+        auth_header = request.headers.get("Authorization", "") if hasattr(request, "headers") else ""
+        # In FastAPI, we usually use Header or Depends, but here we can check the request object if it was a Starlette request
+        # Actually, let's use a cleaner way for simplicity in this script:
+        pass # Will implement check using a helper
+    
     logger.info(f"Embed: processing {len(request.entries)} entries")
 
     # Get embedding dimension
@@ -454,14 +521,17 @@ async def embed(request: EmbedRequest):
 
 
 @app.post("/embed/text", response_model=EmbedTextResponse)
-async def embed_text(request: EmbedTextRequest):
+async def embed_text(request: EmbedTextRequest, authorization: Optional[str] = Header(None)):
     """
-    Generate embedding for a single text string.
-
-    Simple endpoint for embedding individual texts.
+    Generate embedding for a single text string (Production Lock protected).
     """
     if loading:
         raise HTTPException(status_code=503, detail="Still loading")
+
+    # Production Lock
+    if PRODUCTION_MODE:
+        if authorization != f"Bearer {PROD_CACHE_KEY}":
+             raise HTTPException(status_code=403, detail="Not authorized to modify semantic cache")
 
     if not request.text:
         raise HTTPException(status_code=400, detail="No text provided")
