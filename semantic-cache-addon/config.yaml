@@ -1,5 +1,5 @@
 name: "Semantic Cache Add-on"
-version: "1.0.21"
+version: "1.0.22"
 slug: "semantic_cache"
 description: "Semantic cache lookup for Multi-Stage Assist"
 url: "https://github.com/kr0ner/semantic-cache-addon"
@@ -19,6 +19,8 @@ ports_description:
   9876/tcp: "Cache API"
 options:
   embedding_model: "/share/semantic-cache/models/bge-m3-smart-cache"
+  classifier_model: "/share/semantic-cache/models/classifier"
+  classifier_confidence_threshold: 0.6
   device: "cpu"
   port: 9876
   HF_HOME: "/share/semantic-cache"
@@ -32,6 +34,8 @@ options:
   prod_cache_key: ""
 schema:
   embedding_model: str
+  classifier_model: str
+  classifier_confidence_threshold: "float(0.1,1.0)"
   device: list(auto|cpu|cuda|mps)
   port: int
   HF_HOME: str

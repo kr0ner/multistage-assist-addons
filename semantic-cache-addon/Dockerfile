@@ -19,13 +19,15 @@ RUN pip install --no-cache-dir \
     aiofiles \
     rank_bm25 \
     "transformers<4.45" \
-    einops
+    einops \
+    onnxruntime
 
 # Copy application files
 COPY app.py /app.py
 COPY cache_types.py /cache_types.py
 COPY cache_loader.py /cache_loader.py
 COPY embedding.py /embedding.py
+COPY classifier.py /classifier.py
 COPY bm25_index.py /bm25_index.py
 COPY file_watcher.py /file_watcher.py
 COPY run.sh /run.sh

@@ -6,6 +6,8 @@ CONFIG_PATH=/data/options.json
 
 # Model settings
 EMBEDDING_MODEL=$(jq -r '.embedding_model' $CONFIG_PATH)
+CLASSIFIER_MODEL=$(jq -r '.classifier_model' $CONFIG_PATH)
+CLASSIFIER_CONFIDENCE_THRESHOLD=$(jq -r '.classifier_confidence_threshold' $CONFIG_PATH)
 DEVICE=$(jq -r '.device' $CONFIG_PATH)
 PORT=$(jq -r '.port' $CONFIG_PATH)
 HF_HOME_PATH=$(jq -r '.HF_HOME' $CONFIG_PATH)
@@ -24,6 +26,8 @@ PROD_CACHE_KEY=$(jq -r '.prod_cache_key' $CONFIG_PATH)
 
 echo "[INFO] Starting Semantic Cache addon..."
 echo "[INFO] Embedding model: $EMBEDDING_MODEL"
+echo "[INFO] Classifier model: $CLASSIFIER_MODEL"
+echo "[INFO] Classifier confidence threshold: $CLASSIFIER_CONFIDENCE_THRESHOLD"
 echo "[INFO] Device: $DEVICE"
 echo "[INFO] Port: $PORT"
 echo "[INFO] Model cache: $HF_HOME_PATH"
@@ -35,6 +39,8 @@ mkdir -p "$HF_HOME_PATH"
 
 # Export as environment variables
 export EMBEDDING_MODEL="$EMBEDDING_MODEL"
+export CLASSIFIER_MODEL="$CLASSIFIER_MODEL"
+export CLASSIFIER_CONFIDENCE_THRESHOLD="$CLASSIFIER_CONFIDENCE_THRESHOLD"
 export RERANKER_DEVICE="$DEVICE"
 export ANCHORS_FILE="$ANCHORS_FILE"
 export USER_CACHE_FILE="$USER_CACHE_FILE"

@@ -23,9 +23,12 @@ from cache_loader import CacheLoader
 from bm25_index import BM25Index
 from file_watcher import CacheFileWatcher
 import embedding as emb
+import classifier as clf
 
 # Configuration from environment (set by run.sh from addon options)
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "/share/semantic-cache/models/classifier")
+CLASSIFIER_CONFIDENCE_THRESHOLD = float(os.getenv("CLASSIFIER_CONFIDENCE_THRESHOLD", "0.6"))
 DEVICE = os.getenv("RERANKER_DEVICE", "cpu")  # Key kept for compatibility
 ANCHORS_FILE = os.getenv("ANCHORS_FILE", "/homeassistant/.storage/multistage_assist_anchors.json")
 USER_CACHE_FILE = os.getenv("USER_CACHE_FILE", "/homeassistant/.storage/multistage_assist_semantic_cache.json")
@@ -71,17 +74,25 @@ loading = True
 # Language constants aligned with german_utils.py
 GERMAN_ARTICLES = {"der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "einer", "eines"}
 GERMAN_PREPOSITIONS = {"im", "in", "auf", "unter", "über", "am", "bei", "zum", "zur", "vom", "von", "für", "mit", "nach"}
-FILLER_WORDS = {"bitte", "mal", "gerne", "doch", "kannst", "könntest", "würdest"}
+FILLER_WORDS = {"bitte", "mal", "gerne", "doch", "kannst", "könntest", "würdest", "du", "sie", "hallo", "assist", "danke", "hey"}
+
+# Area Aliases ported from area_keywords.py
+AREA_ALIASES = {
+    "bad": "Badezimmer", "wc": "Gaeste-WC", "kizi": "Kinderzimmer",
+    "sz": "Schlafzimmer", "wz": "Wohnzimmer", "ez": "Esszimmer",
+    "kue": "Kueche", "kueche": "Kueche", "fl": "Flur", "ke": "Keller",
+    "buero": "Buero", "büro": "Buero", "arbeitszimmer": "Buero"
+}
 
 def normalize_umlauts(text: str) -> str:
     """Normalize German umlauts and ß to ASCII equivalents."""
     return text.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
 
 def canonicalize(text: str) -> str:
-    """Standardize text: lower, ASCII-umlauts, remove special chars."""
+    """Standardize text: ASCII-umlauts, remove special chars, KEEP casing."""
     if not text: return ""
     import unicodedata
-    t = unicodedata.normalize('NFC', text.lower())
+    t = unicodedata.normalize('NFC', text) # Preserving casing as requested
     t = normalize_umlauts(t)
     t = re.sub(r"[^\w\s%°]+", " ", t)
     return re.sub(r"\s+", " ", t).strip()
@@ -90,6 +101,19 @@ def strip_filler_words(text: str) -> str:
     """Strip meaningless filler words while preserving grammar."""
     tokens = text.split()
     return " ".join([w for w in tokens if w.lower() not in FILLER_WORDS]).strip()
+
+def map_area_alias(text: str) -> str:
+    """Map common room abbreviations to canonical names."""
+    if not text: return text
+    words = text.split()
+    mapped = []
+    for word in words:
+        clean = word.lower().strip(",.!?:")
+        if clean in AREA_ALIASES:
+            mapped.append(AREA_ALIASES[clean])
+        else:
+            mapped.append(word)
+    return " ".join(mapped)
 
 class LookupRequest(BaseModel):
     """Request body for cache lookup."""
@@ -113,6 +137,7 @@ class LookupResponse(BaseModel):
     original_text: Optional[str] = None
     reranked: bool = False
     candidates: List[Candidate] = []
+    classification: Optional[Dict[str, Any]] = None
 
 
 class EmbedEntryRequest(BaseModel):
@@ -148,6 +173,21 @@ class EmbedResponse(BaseModel):
 class EmbedTextRequest(BaseModel):
     """Request body for embedding a single text."""
     text: str
+
+
+class ClassifyRequest(BaseModel):
+    """Request body for classification."""
+    text: str
+
+
+class ClassifyResponse(BaseModel):
+    """Response from intent + domain classification."""
+    intent: str
+    intent_confidence: float
+    domain: str
+    domain_confidence: float
+    intent_top3: List[Dict[str, Any]] = []
+    domain_top3: List[Dict[str, Any]] = []
 
 
 class EmbedTextResponse(BaseModel):
@@ -187,6 +227,9 @@ def normalize_numeric_value(text: str) -> Tuple[str, List[Any]]:
     """Normalize text for semantic cache matching, aligned with main app centroids."""
     if not text: return "", []
     
+    # 0. Alias mapping (Ported from Principle 2)
+    text = map_area_alias(text)
+    
     # Standard Canonicalization
     text_norm = canonicalize(text)
     extracted: List[Any] = []
@@ -215,9 +258,6 @@ def normalize_numeric_value(text: str) -> Tuple[str, List[Any]]:
         pattern = r"\b" + fraction_word + r"\b"
         if re.search(pattern, text_norm, flags=re.IGNORECASE):
             text_norm = re.sub(pattern, "50 prozent", text_norm, flags=re.IGNORECASE)
-
-    # 4. Strip filler words
-    text_norm = strip_filler_words(text_norm)
 
     return re.sub(r"\s+", " ", text_norm).strip(), extracted
 
@@ -260,6 +300,8 @@ async def startup():
     logger.info("STARTING SEMANTIC CACHE API")
     logger.info("=" * 60)
     logger.info(f"Embedding model: {EMBEDDING_MODEL}")
+    logger.info(f"Classifier model: {CLASSIFIER_MODEL}")
+    logger.info(f"Classifier confidence threshold: {CLASSIFIER_CONFIDENCE_THRESHOLD}")
     logger.info(f"Device: {DEVICE}")
     logger.info(f"Anchors file: {ANCHORS_FILE}")
     logger.info(f"User cache file: {USER_CACHE_FILE}")
@@ -275,6 +317,13 @@ async def startup():
     logger.info("Loading embedding model...")
     emb.load_embedding_model(EMBEDDING_MODEL, actual_device)
     logger.info("Embedding model loaded")
+
+    # Load classifier (optional — gracefully skipped if not present)
+    logger.info("Loading classifier model...")
+    if clf.load_classifier(CLASSIFIER_MODEL):
+        logger.info("Classifier loaded successfully")
+    else:
+        logger.warning("Classifier not loaded — classification pre-filtering disabled")
 
     # Load cache
     logger.info("Loading cache files...")
@@ -325,6 +374,8 @@ async def health():
         "status": "loading" if loading else "ok",
         "version": "2.1.0-normalization-fix",
         "embedding_model": EMBEDDING_MODEL,
+        "classifier_model": CLASSIFIER_MODEL,
+        "classifier_loaded": clf.is_loaded(),
         "device": DEVICE,
         "cache_entries": len(cache_loader.entries) if cache_loader else 0,
         "vector_threshold": VECTOR_THRESHOLD,
@@ -345,15 +396,25 @@ async def lookup(request: LookupRequest):
     if loading:
         raise HTTPException(status_code=503, detail="Still loading")
 
+    query = request.query
+    logger.info(f"Lookup: '{query[:60]}'")
+
+    # Classify intent + domain (if classifier loaded) — always runs, even if cache is empty
+    classification = None
+    if clf.is_loaded():
+        classification = clf.classify(query)
+        if classification:
+            logger.info(
+                f"Classified: {classification['intent']} ({classification['intent_confidence']:.2f}) "
+                f"/ {classification['domain']} ({classification['domain_confidence']:.2f})"
+            )
+
     if not cache_loader or not cache_loader.is_loaded:
-        return LookupResponse(found=False, score=0.0)
+        return LookupResponse(found=False, score=0.0, classification=classification)
 
     if cache_loader.embeddings_matrix is None or len(cache_loader.entries) == 0:
         logger.debug("Cache empty")
-        return LookupResponse(found=False, score=0.0)
-
-    query = request.query
-    logger.info(f"Lookup: '{query[:60]}'")
+        return LookupResponse(found=False, score=0.0, classification=classification)
 
     # Normalize query (handle percentages, temperatures)
     query_norm, extracted_values = normalize_numeric_value(query)
@@ -410,11 +471,38 @@ async def lookup(request: LookupRequest):
 
     if not candidates:
         logger.debug(f"No candidates above threshold {VECTOR_THRESHOLD}")
-        return LookupResponse(found=False, score=0.0)
+        return LookupResponse(found=False, score=0.0, classification=classification)
 
     # Sort and take top-k
     candidates.sort(key=lambda x: x[0], reverse=True)
     candidates = candidates[:VECTOR_TOP_K]
+
+    # Classifier pre-filtering: boost candidates matching predicted intent/domain
+    if classification and classification["intent_confidence"] >= CLASSIFIER_CONFIDENCE_THRESHOLD:
+        predicted_intent = classification["intent"]
+        predicted_domain = classification["domain"]
+        intent_conf = classification["intent_confidence"]
+        domain_conf = classification["domain_confidence"]
+
+        # Re-score: boost matching intent/domain, penalize mismatches
+        rescored = []
+        for score, idx, entry in candidates:
+            boost = 0.0
+            if entry.intent == predicted_intent and intent_conf >= CLASSIFIER_CONFIDENCE_THRESHOLD:
+                boost += 0.05 * intent_conf
+            # Domain match from entity_ids (entity_id format: domain.entity)
+            entry_domains = {eid.split(".")[0] for eid in entry.entity_ids if "." in eid}
+            if predicted_domain in entry_domains and domain_conf >= CLASSIFIER_CONFIDENCE_THRESHOLD:
+                boost += 0.03 * domain_conf
+            rescored.append((score + boost, idx, entry))
+
+        rescored.sort(key=lambda x: x[0], reverse=True)
+        candidates = rescored
+        if candidates:
+            logger.debug(
+                f"Classifier re-scored: top={candidates[0][0]:.4f} "
+                f"(was {candidates[0][0] - 0.08:.4f})"
+            )
 
     # Selection: take top candidate
     best_prob, cache_idx, entry = candidates[0]
@@ -453,7 +541,39 @@ async def lookup(request: LookupRequest):
         score=best_prob,
         original_text=entry.text,
         reranked=False,
-        candidates=candidates_list
+        candidates=candidates_list,
+        classification=classification,
+    )
+
+
+@app.post("/classify", response_model=ClassifyResponse)
+async def classify_text(request: ClassifyRequest):
+    """
+    Classify a German smart home command into intent + domain.
+
+    Returns predicted intent, domain, and confidence scores.
+    Requires the classifier model to be loaded (optional feature).
+    """
+    if loading:
+        raise HTTPException(status_code=503, detail="Still loading")
+
+    if not clf.is_loaded():
+        raise HTTPException(
+            status_code=503,
+            detail="Classifier not loaded. Set classifier_model in addon config.",
+        )
+
+    result = clf.classify(request.text)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Classification failed")
+
+    return ClassifyResponse(
+        intent=result["intent"],
+        intent_confidence=result["intent_confidence"],
+        domain=result["domain"],
+        domain_confidence=result["domain_confidence"],
+        intent_top3=result.get("intent_top3", []),
+        domain_top3=result.get("domain_top3", []),
     )
 
 
